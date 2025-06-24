@@ -1,0 +1,1034 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Task Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Firebase SDK imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, getDocs, addDoc, setDoc, updateDoc, deleteDoc, doc, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables for Firebase initialization, provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        let app;
+        let db;
+        let auth;
+        let userId; // Will store the Firebase User ID
+        let isAuthReady = false; // Flag to ensure Firebase Auth is initialized before data operations
+
+        // Initialize Firebase and set up authentication listener
+        async function initializeFirebase() {
+            try {
+                if (!app) { // Initialize app only once
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+
+                    onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            console.log("Authenticated with user ID:", userId);
+                        } else {
+                            console.log("No user, attempting anonymous sign-in or custom token sign-in.");
+                            try {
+                                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                    // Sign in with custom token if available
+                                    await signInWithCustomToken(auth, __initial_auth_token);
+                                    userId = auth.currentUser.uid;
+                                    console.log("Signed in with custom token. User ID:", userId);
+                                } else {
+                                    // Sign in anonymously if no custom token
+                                    await signInAnonymously(auth);
+                                    userId = auth.currentUser.uid;
+                                    console.log("Signed in anonymously. User ID:", userId);
+                                }
+                            } catch (error) {
+                                console.error("Firebase authentication failed:", error);
+                                // Fallback to a random ID if authentication completely fails (though data won't persist)
+                                userId = crypto.randomUUID();
+                                console.log("Using a temporary random user ID:", userId);
+                            }
+                        }
+                        isAuthReady = true;
+                        // Once authentication is confirmed, load data from Firestore
+                        window.loadFirestoreData(); // Call globally exposed function
+                        window.renderCompanySections(); // Initial render and show user ID
+                        window.displayUserId(); // Display the user ID
+                    });
+                }
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+            }
+        }
+
+        // --- Data Management Functions (Firestore) ---
+        let tasks = [];
+        let companyDetails = [];
+
+        // Displays the current user ID on the page
+        function displayUserId() {
+            const userIdDisplay = document.getElementById('user-id-display');
+            if (userIdDisplay) {
+                userIdDisplay.textContent = `User ID: ${userId || 'N/A'}`;
+            }
+        }
+
+        /**
+         * Loads tasks and company details from Firestore in real-time using onSnapshot.
+         * Sets up listeners for both collections.
+         */
+        function loadFirestoreData() {
+            if (!isAuthReady || !userId || !db) {
+                console.log("Firebase not ready or userId not available. Cannot load Firestore data.");
+                return;
+            }
+
+            // Listen for tasks updates
+            const tasksColRef = collection(db, `artifacts/${appId}/users/${userId}/tasks`);
+            onSnapshot(tasksColRef, (snapshot) => {
+                tasks = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                console.log("Tasks loaded/updated from Firestore:", tasks);
+                window.renderCompanySections(); // Call globally exposed function
+                window.updateTaskCounts(); // Call globally exposed function
+            }, (error) => {
+                console.error("Error listening to tasks collection:", error);
+            });
+
+            // Listen for company details updates
+            const companyDetailsColRef = collection(db, `artifacts/${appId}/users/${userId}/companyDetails`);
+            onSnapshot(companyDetailsColRef, (snapshot) => {
+                companyDetails = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                console.log("Company details loaded/updated from Firestore:", companyDetails);
+                window.renderCompanySections(); // Re-render to show updated details (call globally exposed function)
+            }, (error) => {
+                console.error("Error listening to company details collection:", error);
+            });
+        }
+
+        /**
+         * Adds a new task to Firestore.
+         * @param {object} newTask - The task object to add.
+         */
+        async function addTaskToFirestore(newTask) {
+            if (!isAuthReady || !userId || !db) {
+                console.error("Firebase not ready. Cannot add task.");
+                return;
+            }
+            try {
+                const docRef = await addDoc(collection(db, `artifacts/${appId}/users/${userId}/tasks`), newTask);
+                console.log("Task added with ID:", docRef.id);
+            } catch (e) {
+                console.error("Error adding document: ", e);
+            }
+        }
+
+        /**
+         * Updates an existing task in Firestore.
+         * @param {string} taskId - The ID of the task document.
+         * @param {object} updatedFields - The fields to update.
+         */
+        async function updateTaskInFirestore(taskId, updatedFields) {
+            if (!isAuthReady || !userId || !db) {
+                console.error("Firebase not ready. Cannot update task.");
+                return;
+            }
+            try {
+                const taskRef = doc(db, `artifacts/${appId}/users/${userId}/tasks`, taskId);
+                await updateDoc(taskRef, updatedFields);
+                console.log("Task updated:", taskId);
+            } catch (e) {
+                console.error("Error updating document: ", e);
+            }
+        }
+
+        /**
+         * Deletes a task from Firestore.
+         * @param {string} taskId - The ID of the task document to delete.
+         */
+        async function deleteTaskFromFirestore(taskId) {
+            if (!isAuthReady || !userId || !db) {
+                console.error("Firebase not ready. Cannot delete task.");
+                return;
+            }
+            try {
+                await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/tasks`, taskId));
+                console.log("Task deleted:", taskId);
+            } catch (e) {
+                console.error("Error deleting document: ", e);
+            }
+        }
+
+        /**
+         * Saves or updates company details in Firestore.
+         * @param {string} companyName - The name of the company (used as document ID).
+         * @param {object} details - The company details object.
+         */
+        async function saveCompanyDetailsToFirestore(companyName, details) {
+            if (!isAuthReady || !userId || !db) {
+                console.error("Firebase not ready. Cannot save company details.");
+                return;
+            }
+            try {
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/companyDetails`, companyName);
+                await setDoc(docRef, details, { merge: true }); // Use merge to update existing fields or create new doc
+                console.log("Company details saved/updated for:", companyName);
+            } catch (e) {
+                console.error("Error saving company details: ", e);
+            }
+        }
+        
+        // Expose Firebase functions to the global scope if needed by other scripts
+        // window.initializeApp = initializeApp; // Example if needed
+        window.getAuth = getAuth;
+        window.signInAnonymously = signInAnonymously;
+        window.signInWithCustomToken = signInWithCustomToken;
+        window.onAuthStateChanged = onAuthStateChanged;
+        window.getFirestore = getFirestore;
+        window.collection = collection;
+        window.getDocs = getDocs;
+        window.addDoc = addDoc;
+        window.setDoc = setDoc;
+        window.updateDoc = updateDoc;
+        window.deleteDoc = deleteDoc;
+        window.doc = doc;
+        window.onSnapshot = onSnapshot;
+        window.query = query;
+        window.where = where;
+        
+        // Make sure these are globally accessible for the rest of the script
+        window.tasks = tasks;
+        window.companyDetails = companyDetails;
+        window.userId = userId;
+        window.isAuthReady = isAuthReady;
+        window.db = db;
+        window.auth = auth;
+        window.appId = appId;
+
+        // Make the Firestore functions globally available
+        window.addTaskToFirestore = addTaskToFirestore;
+        window.updateTaskInFirestore = updateTaskInFirestore;
+        window.deleteTaskFromFirestore = deleteTaskFromFirestore;
+        window.saveCompanyDetailsToFirestore = saveCompanyDetailsToFirestore;
+        window.loadFirestoreData = loadFirestoreData; // Needed for initial load
+        window.displayUserId = displayUserId; // Needed for initial display
+
+        // Call initializeFirebase when the script runs
+        initializeFirebase();
+
+    </script>
+    <style>
+        body {
+            font-family: 'Poppins', sans-serif;
+            background-color: #f0f4f8;
+        }
+        .company-section {
+            transition: all 0.3s ease;
+        }
+        .status-pending {
+            background-color: #FEF3C7;
+            color: #92400E;
+        }
+        .status-completed {
+            background-color: #D1FAE5;
+            color: #065F46;
+        }
+        .status-in-progress {
+            background-color: #DBEAFE;
+            color: #1E40AF;
+        }
+        .company-header {
+            background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%);
+        }
+        .company-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        }
+        .tab-active {
+            border-bottom: 2px solid #4F46E5;
+            color: #4F46E5;
+        }
+        /* Custom modal styles */
+        .modal {
+            display: none; /* Hidden by default */
+            position: fixed; /* Stay in place */
+            z-index: 1000; /* Sit on top */
+            left: 0;
+            top: 0;
+            width: 100%; /* Full width */
+            height: 100%; /* Full height */
+            overflow: auto; /* Enable scroll if needed */
+            background-color: rgba(0,0,0,0.4); /* Black w/ opacity */
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: auto;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            width: 90%;
+            max-width: 500px;
+            position: relative;
+        }
+        .close-button {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+        }
+        .close-button:hover,
+        .close-button:focus {
+            color: black;
+            text-decoration: none;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mx-auto px-4 py-8 max-w-7xl">
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">Project Task Manager</h1>
+            <p class="text-gray-600 mb-2">Track tasks, deadlines, and company details</p>
+            <p id="user-id-display" class="text-sm text-gray-500 mb-6">User ID: Loading...</p>
+
+            <!-- Quick Navigation -->
+            <div class="mb-8">
+                <h2 class="text-lg font-semibold text-gray-700 mb-3">Jump to Company:</h2>
+                <div class="flex flex-wrap gap-2">
+                    <a href="#3bros" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">3bros</a>
+                    <a href="#AH" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">AH</a>
+                    <a href="#Anabina" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">Anabina</a>
+                    <a href="#Anatravel" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">Anatravel</a>
+                    <a href="#MzNZ" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">MzNZ</a>
+                    <a href="#RDHOME" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">RDHOME</a>
+                    <a href="#KFS" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">KFS</a>
+                    <a href="#KPSE" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">KPSE</a>
+                    <a href="#PROJECT X" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">PROJECT X</a>
+                    <a href="#TYARA GROUP" class="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-medium hover:bg-indigo-200 transition-all">TYARA GROUP</a>
+                </div>
+            </div>
+
+            <!-- Task Summary -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                <div class="bg-indigo-50 rounded-lg p-4 border border-indigo-100">
+                    <h3 class="text-lg font-semibold text-indigo-800">Total Tasks</h3>
+                    <p id="total-tasks" class="text-3xl font-bold text-indigo-600">0</p>
+                </div>
+                <div class="bg-amber-50 rounded-lg p-4 border border-amber-100">
+                    <h3 class="text-lg font-semibold text-amber-800">Pending & In Progress</h3>
+                    <p id="pending-tasks" class="text-3xl font-bold text-amber-600">0</p>
+                </div>
+                <div class="bg-emerald-50 rounded-lg p-4 border border-emerald-100">
+                    <h3 class="text-lg font-semibold text-emerald-800">Completed Tasks</h3>
+                    <p id="completed-tasks" class="text-3xl font-bold text-emerald-600">0</p>
+                </div>
+            </div>
+
+            <!-- Filter -->
+            <div class="mb-8">
+                <h2 class="text-lg font-semibold text-gray-700 mb-3">Filter by Status:</h2>
+                <div class="flex flex-wrap gap-3">
+                    <button id="all-filter" class="filter-btn bg-indigo-600 text-white px-4 py-2 rounded-full text-sm font-medium transition-all">
+                        All Status
+                    </button>
+                    <button id="pending-filter" class="filter-btn bg-gray-100 hover:bg-gray-200 px-4 py-2 rounded-full text-sm font-medium transition-all">
+                        Pending
+                    </button>
+                    <button id="progress-filter" class="filter-btn bg-gray-100 hover:bg-gray-200 px-4 py-2 rounded-full text-sm font-medium transition-all">
+                        In Progress
+                    </button>
+                    <button id="completed-filter" class="filter-btn bg-gray-100 hover:bg-gray-200 px-4 py-2 rounded-full text-sm font-medium transition-all">
+                        Completed
+                    </button>
+                </div>
+            </div>
+
+            <!-- Company Sections -->
+            <div id="company-sections" class="space-y-8">
+                <!-- Company sections will be populated here -->
+            </div>
+        </div>
+
+        <!-- Add Task Form -->
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <h2 class="text-xl font-bold text-gray-800 mb-4" id="task-form-title">Add New Task</h2>
+            <form id="add-task-form" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Company</label>
+                    <select id="company-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                        <option value="">Select Company</option>
+                        <option value="3bros">3bros</option>
+                        <option value="AH">AH</option>
+                        <option value="Anabina">Anabina</option>
+                        <option value="Anatravel">Anatravel</option>
+                        <option value="MzNZ">MzNZ</option>
+                        <option value="RDHOME">RDHOME</option>
+                        <option value="KFS">KFS</option>
+                        <option value="KPSE">KPSE</option>
+                        <option value="PROJECT X">PROJECT X</option>
+                        <option value="TYARA GROUP">TYARA GROUP</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Task Description</label>
+                    <input type="text" id="task-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" placeholder="Enter task description" required>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">PIC</label>
+                    <input type="text" id="pic-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" placeholder="Person in charge">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Deadline</label>
+                    <input type="date" id="deadline-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                    <select id="status-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                        <option value="pending">Pending</option>
+                        <option value="in-progress">In Progress</option>
+                        <option value="completed">Completed</option>
+                    </select>
+                </div>
+                <div class="flex items-end">
+                    <button type="submit" id="add-update-task-btn" class="px-6 py-2 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition-all">Add Task</button>
+                    <button type="button" id="cancel-edit-task-btn" class="ml-2 px-6 py-2 bg-gray-300 text-gray-800 font-medium rounded-lg hover:bg-gray-400 transition-all hidden">Cancel Edit</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Add Company Details Form -->
+        <div class="bg-white rounded-xl shadow-lg p-6">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">Add/Edit Company Details</h2>
+            <form id="company-details-form" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Company</label>
+                    <select id="company-details-select" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                        <option value="">Select Company</option>
+                        <option value="3bros">3bros</option>
+                        <option value="AH">AH</option>
+                        <option value="Anabina">Anabina</option>
+                        <option value="Anatravel">Anatravel</option>
+                        <option value="MzNZ">MzNZ</option>
+                        <option value="RDHOME">RDHOME</option>
+                        <option value="KFS">KFS</option>
+                        <option value="KPSE">KPSE</option>
+                        <option value="PROJECT X">PROJECT X</option>
+                        <option value="TYARA GROUP">TYARA GROUP</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Contact Person</label>
+                    <input type="text" id="contact-person-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" placeholder="Main contact person">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Phone Number</label>
+                    <input type="text" id="phone-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" placeholder="Contact phone number">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                    <input type="email" id="email-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" placeholder="Contact email">
+                </div>
+                <div class="md:col-span-2">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                    <textarea id="address-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" rows="2" placeholder="Company address"></textarea>
+                </div>
+                <div class="md:col-span-2">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                    <textarea id="notes-input" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" rows="3" placeholder="Additional notes about the company"></textarea>
+                </div>
+                <div class="flex items-end md:col-span-2">
+                    <button type="submit" class="px-6 py-2 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition-all">Save Company Details</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Custom Confirmation Modal -->
+    <div id="confirmationModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button">&times;</span>
+            <h3 class="text-lg font-bold mb-4" id="modal-title">Confirm Action</h3>
+            <p id="modal-message" class="mb-6">Are you sure you want to perform this action?</p>
+            <div class="flex justify-end gap-3">
+                <button id="cancelConfirm" class="px-4 py-2 bg-gray-300 text-gray-800 rounded-lg hover:bg-gray-400">Cancel</button>
+                <button id="proceedConfirm" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Proceed</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Access global variables and functions exposed by the Firebase import script
+        // Note: 'tasks' and 'companyDetails' are local variables in this module,
+        // they are updated by the onSnapshot listeners.
+        // The original `window.tasks` and `window.companyDetails` are references
+        // to the Firebase script's internal arrays. We need to use the local ones
+        // or ensure they are properly updated.
+        // For simplicity and to match previous logic, we'll redefine them as local
+        // and ensure the Firebase onSnapshot updates these specific local variables.
+        let tasks = [];
+        let companyDetails = [];
+
+        // Re-declare Firebase-related variables and functions here to ensure they are accessible
+        // within this module's scope without relying solely on window.
+        let db = null;
+        let userId = null;
+        let isAuthReady = false;
+        let appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // Firebase functions from the first module
+        const { getFirestore, collection, addDoc, setDoc, updateDoc, deleteDoc, doc, onSnapshot } = window;
+
+
+        // Current filter status
+        let currentStatus = 'all';
+
+        // Variable to hold the ID of the task being edited
+        let editingTaskId = null;
+
+        // Company colors for visual distinction
+        const companyColors = {
+            "3bros": { bg: "bg-blue-50", border: "border-blue-200", header: "from-blue-500 to-blue-700" },
+            "AH": { bg: "bg-green-50", border: "border-green-200", header: "from-green-500 to-green-700" },
+            "Anabina": { bg: "bg-purple-50", border: "border-purple-200", header: "from-purple-500 to-purple-700" },
+            "Anatravel": { bg: "bg-pink-50", border: "border-pink-200", header: "from-pink-500 to-pink-700" },
+            "MzNZ": { bg: "bg-yellow-50", border: "border-yellow-200", header: "from-yellow-500 to-yellow-700" },
+            "RDHOME": { bg: "bg-red-50", border: "border-red-200", header: "from-red-500 to-red-700" },
+            "KFS": { bg: "bg-indigo-50", border: "border-indigo-200", header: "from-indigo-500 to-indigo-700" },
+            "KPSE": { bg: "bg-cyan-50", border: "border-cyan-200", header: "from-cyan-500 to-cyan-700" },
+            "PROJECT X": { bg: "bg-orange-50", border: "border-orange-200", header: "from-orange-500 to-orange-700" },
+            "TYARA GROUP": { bg: "bg-teal-50", border: "border-teal-200", header: "from-teal-500 to-teal-700" }
+        };
+
+        // DOM elements
+        const companyDetailsSelect = document.getElementById('company-details-select');
+        const contactPersonInput = document.getElementById('contact-person-input');
+        const phoneInput = document.getElementById('phone-input');
+        const emailInput = document.getElementById('email-input');
+        const addressInput = document.getElementById('address-input');
+        const notesInput = document.getElementById('notes-input');
+        const addTaskForm = document.getElementById('add-task-form');
+        const companyInput = document.getElementById('company-input');
+        const taskInput = document.getElementById('task-input');
+        const picInput = document.getElementById('pic-input');
+        const deadlineInput = document.getElementById('deadline-input');
+        const statusInput = document.getElementById('status-input');
+        const addUpdateTaskBtn = document.getElementById('add-update-task-btn');
+        const cancelEditTaskBtn = document.getElementById('cancel-edit-task-btn');
+        const taskFormTitle = document.getElementById('task-form-title');
+        const companyDetailsForm = document.getElementById('company-details-form');
+
+        const confirmationModal = document.getElementById('confirmationModal');
+        const modalTitle = document.getElementById('modal-title');
+        const modalMessage = document.getElementById('modal-message');
+        const cancelConfirmBtn = document.getElementById('cancelConfirm');
+        const proceedConfirmBtn = document.getElementById('proceedConfirm');
+        const closeButton = document.querySelector('.close-button');
+
+
+        /**
+         * Shows a custom confirmation modal.
+         * @param {string} title - The title of the modal.
+         * @param {string} message - The message to display.
+         * @returns {Promise<boolean>} - Resolves true if confirmed, false if cancelled.
+         */
+        function showConfirmationModal(title, message) {
+            return new Promise(resolve => {
+                modalTitle.textContent = title;
+                modalMessage.textContent = message;
+                confirmationModal.style.display = 'flex'; // Use flex to center
+
+                const onProceed = () => {
+                    confirmationModal.style.display = 'none';
+                    proceedConfirmBtn.removeEventListener('click', onProceed);
+                    cancelConfirmBtn.removeEventListener('click', onCancel);
+                    closeButton.removeEventListener('click', onCancel);
+                    resolve(true);
+                };
+
+                const onCancel = () => {
+                    confirmationModal.style.display = 'none';
+                    proceedConfirmBtn.removeEventListener('click', onProceed);
+                    cancelConfirmBtn.removeEventListener('click', onCancel);
+                    closeButton.removeEventListener('click', onCancel);
+                    resolve(false);
+                };
+
+                proceedConfirmBtn.addEventListener('click', onProceed);
+                cancelConfirmBtn.addEventListener('click', onCancel);
+                closeButton.addEventListener('click', onCancel);
+            });
+        }
+
+
+        // Update task count summary
+        function updateTaskCounts() {
+            const totalCount = tasks.length;
+            const pendingCount = tasks.filter(task => task.status === 'pending').length;
+            const inProgressCount = tasks.filter(task => task.status === 'in-progress').length;
+            const completedCount = tasks.filter(task => task.status === 'completed').length;
+
+            document.getElementById('total-tasks').textContent = totalCount;
+            document.getElementById('pending-tasks').textContent = pendingCount + inProgressCount;
+            document.getElementById('completed-tasks').textContent = completedCount;
+        }
+        window.updateTaskCounts = updateTaskCounts; // Expose globally
+
+
+        // Render company sections with their respective tasks
+        function renderCompanySections() {
+            const companySections = document.getElementById('company-sections');
+            companySections.innerHTML = '';
+
+            // Get unique companies from the tasks and predefined options
+            const predefinedCompanies = Array.from(companyInput.options).filter(opt => opt.value !== '').map(opt => opt.value);
+            const companiesInTasks = [...new Set(tasks.map(task => task.company))];
+            const allCompanies = [...new Set([...predefinedCompanies, ...companiesInTasks])].sort(); // Ensure consistent order
+
+            allCompanies.forEach(company => {
+                // Filter tasks for this company based on current status filter
+                let companyTasks = tasks.filter(task => task.company === company);
+
+                if (currentStatus !== 'all') {
+                    companyTasks = companyTasks.filter(task => task.status === currentStatus);
+                }
+
+                // If no tasks are found for this company under the current filter AND it's not the 'all' filter, skip rendering the section.
+                // This prevents empty company sections from appearing when a specific status is filtered.
+                if (companyTasks.length === 0 && currentStatus !== 'all') {
+                    return;
+                }
+
+                // Get company colors
+                const colors = companyColors[company] || { bg: "bg-gray-50", border: "border-gray-200", header: "from-gray-500 to-gray-700" };
+
+                // Get company details
+                const details = companyDetails.find(d => d.id === company) || {
+                    id: company, // Firestore ID for company details is the company name
+                    contactPerson: '',
+                    phone: '',
+                    email: '',
+                    address: '',
+                    notes: ''
+                };
+
+                // Create company section
+                const section = document.createElement('div');
+                section.className = `company-section ${colors.bg} rounded-xl shadow-md border ${colors.border} overflow-hidden company-card`;
+                section.id = company;
+
+                // Company header
+                const header = document.createElement('div');
+                header.className = `company-header bg-gradient-to-r ${colors.header} p-4 text-white`;
+                header.innerHTML = `
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-xl font-bold">${company}</h2>
+                        <span class="bg-white text-gray-800 px-3 py-1 rounded-full text-sm font-medium">
+                            ${companyTasks.length} Task${companyTasks.length !== 1 ? 's' : ''}
+                        </span>
+                    </div>
+                `;
+                section.appendChild(header);
+
+                // Tabs for Tasks and Details
+                const tabs = document.createElement('div');
+                tabs.className = 'flex border-b bg-white';
+                tabs.innerHTML = `
+                    <button class="tab-button tab-active px-4 py-2 font-medium text-sm" data-tab="tasks-${company}">Tasks</button>
+                    <button class="tab-button px-4 py-2 font-medium text-sm" data-tab="details-${company}">Company Details</button>
+                `;
+                section.appendChild(tabs);
+
+                // Tasks tab content
+                const tasksContent = document.createElement('div');
+                tasksContent.className = 'tab-content';
+                tasksContent.id = `tasks-${company}`;
+
+                if (companyTasks.length > 0) {
+                    tasksContent.innerHTML = `
+                        <div class="overflow-x-auto p-4">
+                            <table class="min-w-full text-sm text-left rounded-lg overflow-hidden">
+                                <thead class="text-xs uppercase bg-white bg-opacity-80">
+                                    <tr>
+                                        <th scope="col" class="px-6 py-3">Task</th>
+                                        <th scope="col" class="px-6 py-3">PIC</th>
+                                        <th scope="col" class="px-6 py-3">Deadline</th>
+                                        <th scope="col" class="px-6 py-3">Status</th>
+                                        <th scope="col" class="px-6 py-3">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="task-table-${company.replace(/\s+/g, '-')}" class="divide-y divide-gray-200">
+                                    <!-- Tasks will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    `;
+                } else {
+                    tasksContent.innerHTML = `
+                        <div class="text-center py-8">
+                            <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+                            </svg>
+                            <h3 class="mt-2 text-sm font-medium text-gray-900">No tasks found</h3>
+                            <p class="mt-1 text-sm text-gray-500">Get started by creating a new task for this company.</p>
+                        </div>
+                    `;
+                }
+                section.appendChild(tasksContent);
+
+                // Details tab content
+                const detailsContent = document.createElement('div');
+                detailsContent.className = 'tab-content hidden p-4';
+                detailsContent.id = `details-${company}`;
+
+                detailsContent.innerHTML = `
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <h3 class="text-sm font-medium text-gray-500">Contact Person</h3>
+                            <p class="text-base font-medium text-gray-900">${details.contactPerson || 'Not specified'}</p>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-medium text-gray-500">Phone</h3>
+                            <p class="text-base font-medium text-gray-900">${details.phone || 'Not specified'}</p>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-medium text-gray-500">Email</h3>
+                            <p class="text-base font-medium text-gray-900">${details.email || 'Not specified'}</p>
+                        </div>
+                        <div class="md:col-span-2">
+                            <h3 class="text-sm font-medium text-gray-500">Address</h3>
+                            <p class="text-base font-medium text-gray-900">${details.address || 'Not specified'}</p>
+                        </div>
+                        <div class="md:col-span-2">
+                            <h3 class="text-sm font-medium text-gray-500">Notes</h3>
+                            <p class="text-base font-medium text-gray-900 whitespace-pre-line">${details.notes || 'No notes available'}</p>
+                        </div>
+                        <div class="md:col-span-2">
+                            <button class="edit-details-btn px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-all text-sm font-medium" data-company="${company}">
+                                Edit Details
+                            </button>
+                        </div>
+                    </div>
+                `;
+                section.appendChild(detailsContent);
+
+                // Add section to container
+                companySections.appendChild(section);
+
+                // Populate tasks for this company
+                if (companyTasks.length > 0) {
+                    const taskTable = document.getElementById(`task-table-${company.replace(/\s+/g, '-')}`);
+
+                    companyTasks.forEach(task => {
+                        const row = document.createElement('tr');
+                        row.className = 'bg-white bg-opacity-60 border-b hover:bg-opacity-100 transition-all';
+                        row.dataset.id = task.id; // Use task.id (Firestore document ID)
+
+                        let statusClass = '';
+                        let statusText = '';
+
+                        switch(task.status) {
+                            case 'pending':
+                                statusClass = 'status-pending';
+                                statusText = 'Pending';
+                                break;
+                            case 'in-progress':
+                                statusClass = 'status-in-progress';
+                                statusText = 'In Progress';
+                                break;
+                            case 'completed':
+                                statusClass = 'status-completed';
+                                statusText = 'Completed';
+                                break;
+                        }
+
+                        row.innerHTML = `
+                            <td class="px-6 py-4 font-medium">${task.task}</td>
+                            <td class="px-6 py-4">${task.pic || '-'}</td>
+                            <td class="px-6 py-4">${task.deadline || '-'}</td>
+                            <td class="px-6 py-4">
+                                <span class="px-2 py-1 rounded-full text-xs font-medium ${statusClass}">
+                                    ${statusText}
+                                </span>
+                            </td>
+                            <td class="px-6 py-4 flex gap-2">
+                                <button class="edit-btn text-blue-600 hover:text-blue-800" data-id="${task.id}">Edit</button>
+                                <button class="delete-btn text-red-600 hover:text-red-800" data-id="${task.id}">Delete</button>
+                                <button class="status-btn text-green-600 hover:text-green-800" data-id="${task.id}" data-status="${task.status}">
+                                    ${task.status === 'completed' ? 'Mark Pending' : 'Mark Complete'}
+                                </button>
+                            </td>
+                        `;
+
+                        taskTable.appendChild(row);
+                    });
+                }
+            });
+
+            // Add event listeners to dynamically created buttons
+            window.addEventListenersToDynamicElements(); // Call globally exposed function
+        }
+        window.renderCompanySections = renderCompanySections; // Expose globally
+
+        // Add event listeners to dynamically created elements
+        function addEventListenersToDynamicElements() {
+            document.querySelectorAll('.edit-btn').forEach(btn => {
+                btn.addEventListener('click', handleEdit);
+            });
+
+            document.querySelectorAll('.delete-btn').forEach(btn => {
+                btn.addEventListener('click', handleDelete);
+            });
+
+            document.querySelectorAll('.status-btn').forEach(btn => {
+                btn.addEventListener('click', handleStatusToggle);
+            });
+
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.addEventListener('click', handleTabClick);
+            });
+
+            document.querySelectorAll('.edit-details-btn').forEach(btn => {
+                btn.addEventListener('click', handleEditDetails);
+            });
+        }
+        window.addEventListenersToDynamicElements = addEventListenersToDynamicElements; // Expose globally
+
+
+        // Handle tab click
+        function handleTabClick(e) {
+            const tabId = e.target.dataset.tab;
+            const parentSection = e.target.closest('.company-section'); // Get the closest company section
+
+            if (!parentSection) return; // Exit if parent section not found
+
+            const tabButtons = parentSection.querySelectorAll('.tab-button');
+            const tabContents = parentSection.querySelectorAll('.tab-content');
+
+            // Update active tab button
+            tabButtons.forEach(btn => {
+                btn.classList.remove('tab-active');
+            });
+            e.target.classList.add('tab-active');
+
+            // Show selected tab content, hide others
+            tabContents.forEach(content => {
+                if (content.id === tabId) {
+                    content.classList.remove('hidden');
+                } else {
+                    content.classList.add('hidden');
+                }
+            });
+        }
+
+        // Handle edit details button click
+        function handleEditDetails(e) {
+            const company = e.target.dataset.company;
+            companyDetailsSelect.value = company;
+
+            // Trigger change event to load company details into the form
+            const event = new Event('change');
+            companyDetailsSelect.dispatchEvent(event);
+
+            // Scroll to the company details form
+            companyDetailsForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        // Handle adding/updating a task
+        addTaskForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const company = companyInput.value;
+            const task = taskInput.value.trim();
+            const pic = picInput.value.trim();
+            const deadline = deadlineInput.value;
+            const status = statusInput.value;
+
+            if (!company || !task) {
+                await showConfirmationModal("Missing Information", "Please select a company and enter a task description.");
+                return;
+            }
+
+            const taskData = { company, task, pic, deadline, status };
+
+            if (editingTaskId) {
+                // Update existing task
+                await updateTaskInFirestore(editingTaskId, taskData);
+                editingTaskId = null; // Clear editing state
+                addUpdateTaskBtn.textContent = 'Add Task';
+                taskFormTitle.textContent = 'Add New Task';
+                cancelEditTaskBtn.classList.add('hidden');
+            } else {
+                // Add new task
+                await addTaskToFirestore(taskData);
+            }
+
+            addTaskForm.reset(); // Clear the form
+        });
+
+        // Handle canceling task edit
+        cancelEditTaskBtn.addEventListener('click', () => {
+            editingTaskId = null;
+            addTaskForm.reset();
+            addUpdateTaskBtn.textContent = 'Add Task';
+            taskFormTitle.textContent = 'Add New Task';
+            cancelEditTaskBtn.classList.add('hidden');
+        });
+
+        // Handle editing a task
+        function handleEdit(e) {
+            const taskId = e.target.dataset.id; // This is the Firestore document ID
+            const taskToEdit = tasks.find(task => task.id === taskId);
+
+            if (taskToEdit) {
+                companyInput.value = taskToEdit.company;
+                taskInput.value = taskToEdit.task;
+                picInput.value = taskToEdit.pic;
+                deadlineInput.value = taskToEdit.deadline;
+                statusInput.value = taskToEdit.status;
+
+                editingTaskId = taskId; // Set the ID of the task being edited
+                addUpdateTaskBtn.textContent = 'Update Task';
+                taskFormTitle.textContent = 'Edit Task';
+                cancelEditTaskBtn.classList.remove('hidden');
+
+                // Scroll to the add task form
+                addTaskForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+
+        // Handle deleting a task
+        async function handleDelete(e) {
+            const taskId = e.target.dataset.id; // This is the Firestore document ID
+
+            const confirmed = await showConfirmationModal(
+                "Confirm Deletion",
+                "Are you sure you want to delete this task? This action cannot be undone."
+            );
+
+            if (confirmed) {
+                await deleteTaskFromFirestore(taskId);
+            }
+        }
+
+        // Handle toggling task status
+        async function handleStatusToggle(e) {
+            const taskId = e.target.dataset.id; // This is the Firestore document ID
+            const taskIndex = tasks.findIndex(task => task.id === taskId);
+
+            if (taskIndex > -1) {
+                let newStatus;
+                // Toggle between completed and pending/in-progress
+                if (tasks[taskIndex].status === 'completed') {
+                    newStatus = 'pending'; // Or whatever default non-completed status makes sense
+                } else {
+                    newStatus = 'completed';
+                }
+                await updateTaskInFirestore(taskId, { status: newStatus });
+            }
+        }
+
+        // Filter functionality
+        document.querySelectorAll('.filter-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                // Update active button styling
+                document.querySelectorAll('.filter-btn').forEach(btn => {
+                    btn.classList.remove('bg-indigo-600', 'text-white');
+                    btn.classList.add('bg-gray-100', 'hover:bg-gray-200');
+                });
+                this.classList.remove('bg-gray-100', 'hover:bg-gray-200');
+                this.classList.add('bg-indigo-600', 'text-white');
+
+                // Set current filter status and re-render
+                if (this.id === 'all-filter') {
+                    currentStatus = 'all';
+                } else if (this.id === 'pending-filter') {
+                    currentStatus = 'pending';
+                } else if (this.id === 'progress-filter') {
+                    currentStatus = 'in-progress';
+                } else if (this.id === 'completed-filter') {
+                    currentStatus = 'completed';
+                }
+                renderCompanySections();
+            });
+        });
+
+        // Handle saving company details
+        companyDetailsForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const company = companyDetailsSelect.value;
+            const contactPerson = contactPersonInput.value.trim();
+            const phone = phoneInput.value.trim();
+            const email = emailInput.value.trim();
+            const address = addressInput.value.trim();
+            const notes = notesInput.value.trim();
+
+            if (!company) {
+                await showConfirmationModal("Missing Information", "Please select a company to save details for.");
+                return;
+            }
+
+            const detailsData = {
+                contactPerson, phone, email, address, notes
+            };
+
+            await saveCompanyDetailsToFirestore(company, detailsData);
+            companyDetailsForm.reset(); // Clear the form
+            // Also clear the company select, so user has to pick again or it doesn't show outdated details
+            companyDetailsSelect.value = '';
+        });
+
+        // Initialize the app on window load
+        window.onload = function () {
+            // This function runs after all scripts are loaded, ensuring window.db etc. are available.
+            // These assignments are necessary because the first script block runs in its own module scope
+            // and `db`, `userId`, `isAuthReady`, `tasks`, `companyDetails` were defined locally there.
+            // By assigning them from `window` here, we make them available within this module's scope.
+            db = window.db;
+            userId = window.userId;
+            isAuthReady = window.isAuthReady;
+            // The tasks and companyDetails arrays are updated by onSnapshot listeners exposed from the first script,
+            // so we don't need to reassign them from window here, as the references are consistent.
+
+            companyDetailsSelect.addEventListener('change', function() {
+                const selectedCompany = this.value;
+                if (selectedCompany) {
+                    // Access the globally updated companyDetails array
+                    const details = window.companyDetails.find(d => d.id === selectedCompany);
+                    if (details) {
+                        contactPersonInput.value = details.contactPerson || '';
+                        phoneInput.value = details.phone || '';
+                        emailInput.value = details.email || '';
+                        addressInput.value = details.address || '';
+                        notesInput.value = details.notes || '';
+                    } else {
+                        // Clear form if no details exist for the selected company
+                        contactPersonInput.value = '';
+                        phoneInput.value = '';
+                        emailInput.value = '';
+                        addressInput.value = '';
+                        notesInput.value = '';
+                    }
+                } else {
+                    // Clear form if no company is selected
+                    contactPersonInput.value = '';
+                    phoneInput.value = '';
+                    emailInput.value = '';
+                    addressInput.value = '';
+                    notesInput.value = '';
+                }
+            });
+
+            // Initial display of user ID. This will be updated by onAuthStateChanged later.
+            window.displayUserId();
+        }
+    </script>
+</body>
+</html>
